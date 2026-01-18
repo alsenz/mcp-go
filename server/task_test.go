@@ -122,7 +122,7 @@ func TestMCPServer_TaskLifecycle(t *testing.T) {
 
 	// Complete task
 	result := map[string]string{"result": "success"}
-	server.completeTask(entry, result, nil)
+	server.completeTask(entry, mcp.NewToolTaskResultStructuredOnly(result), nil)
 
 	assert.Equal(t, mcp.TaskStatusCompleted, entry.task.Status)
 	assert.Equal(t, result, entry.result)
@@ -278,7 +278,7 @@ func TestMCPServer_HandleCancelTerminalTask(t *testing.T) {
 	ttl := int64(60000)
 	pollInterval := int64(1000)
 	entry := server.createTask(ctx, "task-completed", &ttl, &pollInterval)
-	server.completeTask(entry, "result", nil)
+	server.completeTask(entry, mcp.NewToolTaskResultText("result"), nil)
 
 	// Try to cancel completed task
 	response := server.HandleMessage(ctx, []byte(`{
@@ -405,7 +405,7 @@ func TestMCPServer_TaskResultWaitForCompletion(t *testing.T) {
 	// Start goroutine to complete task after delay
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		server.completeTask(entry, "delayed result", nil)
+		server.completeTask(entry, mcp.NewToolTaskResultText("delayed result"), nil)
 	}()
 
 	// Request task result - should block until completion
@@ -436,7 +436,7 @@ func TestMCPServer_TaskResultWaitForCompletion(t *testing.T) {
 		resp, ok := response.(mcp.JSONRPCResponse)
 		require.True(t, ok, "Expected JSONRPCResponse, got %T", response)
 
-		_, ok = resp.Result.(mcp.TaskResultResult)
+		_, ok = resp.Result.(mcp.TaskPayloadResult)
 		require.True(t, ok, "Expected TaskResultResult, got %T", resp.Result)
 
 	case <-time.After(2 * time.Second):

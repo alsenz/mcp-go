@@ -305,7 +305,7 @@ func (s *MCPServer) HandleMessage(
 		return createResponse(baseMessage.ID, *result)
 	case mcp.MethodToolsCall:
 		var request mcp.CallToolRequest
-		var result *mcp.CallToolResult
+		var result *mcp.AnyToolResult
 		if s.capabilities.tools == nil {
 			err = &requestError{
 				id:   baseMessage.ID,
@@ -320,14 +320,14 @@ func (s *MCPServer) HandleMessage(
 			}
 		} else {
 			request.Header = headers
-			s.hooks.beforeCallTool(ctx, baseMessage.ID, &request)
+			s.hooks.beforeAnyTool(ctx, baseMessage.ID, &request)
 			result, err = s.handleToolCall(ctx, baseMessage.ID, request)
 		}
 		if err != nil {
 			s.hooks.onError(ctx, baseMessage.ID, baseMessage.Method, &request, err)
 			return err.ToJSONRPCError()
 		}
-		s.hooks.afterCallTool(ctx, baseMessage.ID, &request, result)
+		s.hooks.afterAnyTool(ctx, baseMessage.ID, &request, result)
 		return createResponse(baseMessage.ID, *result)
 	case mcp.MethodTasksGet:
 		var request mcp.GetTaskRequest
@@ -383,7 +383,7 @@ func (s *MCPServer) HandleMessage(
 		return createResponse(baseMessage.ID, *result)
 	case mcp.MethodTasksResult:
 		var request mcp.TaskResultRequest
-		var result *mcp.TaskResultResult
+		var result *mcp.TaskPayloadResult
 		if s.capabilities.tasks == nil {
 			err = &requestError{
 				id:   baseMessage.ID,

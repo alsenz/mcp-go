@@ -553,7 +553,22 @@ type ToolListChangedNotification struct {
 	Notification
 }
 
-// Tool represents the definition for a tool the client can call.
+// ToolTaskSupport allows tools to declare support for tasks during tool-level negotiation
+type ToolTaskSupport string
+
+const (
+	ToolTaskSupportRequired  ToolTaskSupport = "required"
+	ToolTaskSupportOptional  ToolTaskSupport = "optional"
+	ToolTaskSupportForbidden ToolTaskSupport = "forbidden"
+)
+
+// ToolExecution specifies execution related properties for the tool
+type ToolExecution struct {
+	// TaskSupport enables tool-level negotiation for servers with Task capabilities
+	TaskSupport ToolTaskSupport `json:"taskSupport,omitempty"`
+}
+
+// Tool represents the definition for a tool the client can call.ß
 type Tool struct {
 	// Meta is a metadata object that is reserved by MCP for storing additional information.
 	Meta *Meta `json:"_meta,omitempty"`
@@ -575,6 +590,8 @@ type Tool struct {
 	DeferLoading bool `json:"defer_loading,omitempty"`
 	// Icons provides visual identifiers for the tool
 	Icons []Icon `json:"icons,omitempty"`
+	// Execution properties for the tool
+	Execution ToolExecution `json:"execution,omitempty"`
 }
 
 // GetName returns the name of the tool.
@@ -916,6 +933,14 @@ func WithIdempotentHintAnnotation(value bool) ToolOption {
 func WithOpenWorldHintAnnotation(value bool) ToolOption {
 	return func(t *Tool) {
 		t.Annotations.OpenWorldHint = &value
+	}
+}
+
+// WithToolLevelTaskSupport sets the execution task support property used during tool-level negotiation.
+// Only applicable for servers and clients with Task capabilities.
+func WithToolLevelTaskSupport(value ToolTaskSupport) ToolOption {
+	return func(t *Tool) {
+		t.Execution.TaskSupport = value
 	}
 }
 

@@ -34,10 +34,21 @@ type SessionWithTools interface {
 	ClientSession
 	// GetSessionTools returns the tools specific to this session, if any
 	// This method must be thread-safe for concurrent access
-	GetSessionTools() map[string]ServerTool
+	GetSessionTools() map[string]ServerTool //TODO update the implementation to map back to server tools...
 	// SetSessionTools sets tools specific to this session
 	// This method must be thread-safe for concurrent access
 	SetSessionTools(tools map[string]ServerTool)
+}
+
+// SessionWithTaskTools is an extension of SessionWithTools that supports task-augmented tool data
+type SessionWithTaskTools interface {
+	SessionWithTools
+	// GetSessionTaskTools returns the tools specific to this session, if any
+	// This method must be thread-safe for concurrent access
+	GetSessionTaskTools() map[string]ServerTaskTool
+	// SetSessionTaskTools sets tools specific to this session
+	// This method must be thread-safe for concurrent access
+	SetSessionTaskTools(tools map[string]ServerTaskTool)
 }
 
 // SessionWithResources is an extension of ClientSession that can store session-specific resource data
@@ -361,6 +372,7 @@ func (s *MCPServer) AddSessionTool(sessionID string, tool mcp.Tool, handler Tool
 }
 
 // AddSessionTools adds tools for a specific session
+// Sessions do not yet support task augmented session tools
 func (s *MCPServer) AddSessionTools(sessionID string, tools ...ServerTool) error {
 	sessionValue, ok := s.sessions.Load(sessionID)
 	if !ok {
@@ -372,7 +384,7 @@ func (s *MCPServer) AddSessionTools(sessionID string, tools ...ServerTool) error
 		return ErrSessionDoesNotSupportTools
 	}
 
-	s.implicitlyRegisterToolCapabilities()
+	//s.implicitlyRegisterToolCapabilities(containTaskAugmented(tools...))
 
 	// Get existing tools (this should return a thread-safe copy)
 	sessionTools := session.GetSessionTools()

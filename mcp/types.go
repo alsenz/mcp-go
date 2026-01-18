@@ -58,7 +58,7 @@ const (
 	// MethodElicitationCreate requests additional information from the user during interactions.
 	// https://modelcontextprotocol.io/docs/concepts/elicitation
 	MethodElicitationCreate MCPMethod = "elicitation/create"
-	
+
 	// MethodNotificationElicitationComplete notifies when a URL mode elicitation completes.
 	MethodNotificationElicitationComplete MCPMethod = "notifications/elicitation/complete"
 
@@ -150,6 +150,13 @@ type ProgressToken any
 // Cursor is an opaque token used to represent a cursor for pagination.
 type Cursor string
 
+// MetadataKey enum covers reserved model context protocol request / response metadata keys
+type MetadataKey string
+
+const (
+	MetadataKeyRelatedTask MetadataKey = "io.modelcontextprotocol/related-task"
+)
+
 // Meta is metadata attached to a request's parameters. This can include fields
 // formally defined by the protocol or other arbitrary data.
 type Meta struct {
@@ -197,6 +204,20 @@ func NewMetaFromMap(m map[string]any) *Meta {
 		ProgressToken:    progressToken,
 		AdditionalFields: m,
 	}
+}
+
+// UpsertUserDefined updates or insert metadata values by any string key
+// Users must ensure metadata complies with MCP base protocol specification.
+func (m *Meta) UpsertUserDefined(key string, data any) {
+	if m.AdditionalFields == nil {
+		m.AdditionalFields = make(map[string]any)
+	}
+	m.AdditionalFields[key] = data
+}
+
+// Upsert updates or insert reserved MCP metadata values by key
+func (m *Meta) Upsert(key MetadataKey, data any) {
+	m.UpsertUserDefined(string(key), data)
 }
 
 type Request struct {
@@ -1366,11 +1387,21 @@ type CreateTaskResult struct {
 	Task Task `json:"task"`
 }
 
+//TODO make a note about the downsides of copies
+
+func (r *CreateTaskResult) ToAnyResult() *AnyToolResult {
+	if r == nil {
+		return nil
+	}
+	var result AnyToolResult = *r
+	return &result
+}
+
 // GetTaskRequest retrieves the current status of a task.
 type GetTaskRequest struct {
 	Request
-	Header http.Header     `json:"-"`
-	Params GetTaskParams   `json:"params"`
+	Header http.Header   `json:"-"`
+	Params GetTaskParams `json:"params"`
 }
 
 type GetTaskParams struct {
@@ -1398,27 +1429,29 @@ type ListTasksResult struct {
 // TaskResultRequest retrieves the result of a completed task.
 type TaskResultRequest struct {
 	Request
-	Header http.Header        `json:"-"`
-	Params TaskResultParams   `json:"params"`
+	Header http.Header      `json:"-"`
+	Params TaskResultParams `json:"params"`
 }
 
 type TaskResultParams struct {
 	TaskId string `json:"taskId"`
 }
 
-// TaskResultResult contains the actual operation result.
-// The structure depends on the original request type.
-type TaskResultResult struct {
-	Result
-	// The actual result varies by request type (e.g., CallToolResult for tools/call).
-	// This will be handled by the specific implementation.
-}
+// TaskPayloadResult contains the actual operation result
+// The actual payload matches the result type of the original request (e.g., CallToolResult for tools/call).
+// Use mcp.ValidateTaskPayload(TaskPayloadResult) to check that interface instances are valid
+type TaskPayloadResult interface{}
+
+// AnyToolResult contains any return type of an initial tool call
+// i.e. a CallToolResult or CreateTaskResult.
+// Use mcp.ValidateAnyToolResult(AnyToolResult) to check that interface instances ore valid
+type AnyToolResult interface{}
 
 // CancelTaskRequest cancels an in-progress task.
 type CancelTaskRequest struct {
 	Request
-	Header http.Header       `json:"-"`
-	Params CancelTaskParams  `json:"params"`
+	Header http.Header      `json:"-"`
+	Params CancelTaskParams `json:"params"`
 }
 
 type CancelTaskParams struct {
@@ -1526,4 +1559,3 @@ func NewElicitationCompleteNotification(elicitationID string) JSONRPCNotificatio
 		},
 	}
 }
-

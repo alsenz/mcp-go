@@ -66,6 +66,14 @@ func WithTaskCreatedAt(createdAt string) TaskOption {
 	}
 }
 
+// WithTaskID overrides the default task ID with a specific ID
+// If task IDs are zero-valued, the server will assign a random ID
+func WithTaskId(id string) TaskOption {
+	return func(t *Task) {
+		t.TaskId = id
+	}
+}
+
 //
 // Task Helper Functions
 //

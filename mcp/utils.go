@@ -279,6 +279,13 @@ func NewToolResultText(text string) *CallToolResult {
 	}
 }
 
+// NewToolTaskResultText creates a new TaskPayloadResult with structured
+// tool call content and creates a JSON string fallback for backwards compatibility.
+func NewToolTaskResultText(text string) *TaskPayloadResult {
+	var result TaskPayloadResult = *NewToolResultText(text)
+	return &result
+}
+
 // NewToolResultJSON creates a new CallToolResult with a JSON content.
 func NewToolResultJSON[T any](data T) (*CallToolResult, error) {
 	b, err := json.Marshal(data)
@@ -311,6 +318,13 @@ func NewToolResultStructured(structured any, fallbackText string) *CallToolResul
 	}
 }
 
+// NewToolTaskResultStructuredOnly creates a new TaskPayloadResult with structured
+// tool call content and a text representation for backward compatibility.
+func NewToolTaskResultStructured(structured any, fallbackText string) *TaskPayloadResult {
+	var result TaskPayloadResult = *NewToolResultStructured(structured, fallbackText)
+	return &result
+}
+
 // NewToolResultStructuredOnly creates a new CallToolResult with structured
 // content and creates a JSON string fallback for backwards compatibility.
 // This is useful when you want to provide structured data without any specific text fallback.
@@ -333,6 +347,15 @@ func NewToolResultStructuredOnly(structured any) *CallToolResult {
 		},
 		StructuredContent: structured,
 	}
+}
+
+//TODO: make sure to write up value copies.
+
+// NewToolTaskResultStructuredOnly creates a new TaskPayloadResult with structured
+// tool call content and creates a JSON string fallback for backwards compatibility.
+func NewToolTaskResultStructuredOnly(structured any) *TaskPayloadResult {
+	var result TaskPayloadResult = *NewToolResultStructuredOnly(structured)
+	return &result
 }
 
 // NewToolResultImage creates a new CallToolResult with both text and image content

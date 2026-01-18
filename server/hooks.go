@@ -57,6 +57,14 @@ type OnSuccessHookFunc func(ctx context.Context, id any, method mcp.MCPMethod, m
 //	})
 type OnErrorHookFunc func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error)
 
+// OnBeforeCallToolFunc is a function that is called before handling a (non-task) Tool call
+// It is always invoked even when the tool call returns a CreateTaskResult
+type OnBeforeCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest)
+
+// OnAfterCallToolFunc is a function that is called after a tool handler has returned an initial response
+// If the tool is task augmented and the tool handler returns a CreateTaskResult, message is nil
+type OnAfterCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult)
+
 // OnRequestInitializationFunc is a function that called before handle diff request method
 // Should any errors arise during func execution, the service will promptly return the corresponding error message.
 type OnRequestInitializationFunc func(ctx context.Context, id any, message any) error
@@ -88,8 +96,8 @@ type OnAfterGetPromptFunc func(ctx context.Context, id any, message *mcp.GetProm
 type OnBeforeListToolsFunc func(ctx context.Context, id any, message *mcp.ListToolsRequest)
 type OnAfterListToolsFunc func(ctx context.Context, id any, message *mcp.ListToolsRequest, result *mcp.ListToolsResult)
 
-type OnBeforeCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest)
-type OnAfterCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult)
+type OnBeforeAnyToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest)
+type OnAfterAnyToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.AnyToolResult)
 
 type OnBeforeGetTaskFunc func(ctx context.Context, id any, message *mcp.GetTaskRequest)
 type OnAfterGetTaskFunc func(ctx context.Context, id any, message *mcp.GetTaskRequest, result *mcp.GetTaskResult)
@@ -98,7 +106,7 @@ type OnBeforeListTasksFunc func(ctx context.Context, id any, message *mcp.ListTa
 type OnAfterListTasksFunc func(ctx context.Context, id any, message *mcp.ListTasksRequest, result *mcp.ListTasksResult)
 
 type OnBeforeTaskResultFunc func(ctx context.Context, id any, message *mcp.TaskResultRequest)
-type OnAfterTaskResultFunc func(ctx context.Context, id any, message *mcp.TaskResultRequest, result *mcp.TaskResultResult)
+type OnAfterTaskResultFunc func(ctx context.Context, id any, message *mcp.TaskResultRequest, result *mcp.TaskPayloadResult)
 
 type OnBeforeCancelTaskFunc func(ctx context.Context, id any, message *mcp.CancelTaskRequest)
 type OnAfterCancelTaskFunc func(ctx context.Context, id any, message *mcp.CancelTaskRequest, result *mcp.CancelTaskResult)
@@ -109,6 +117,8 @@ type Hooks struct {
 	OnBeforeAny                   []BeforeAnyHookFunc
 	OnSuccess                     []OnSuccessHookFunc
 	OnError                       []OnErrorHookFunc
+	OnBeforeCallTool              []OnBeforeCallToolFunc
+	OnAfterCallTool               []OnAfterCallToolFunc
 	OnRequestInitialization       []OnRequestInitializationFunc
 	OnBeforeInitialize            []OnBeforeInitializeFunc
 	OnAfterInitialize             []OnAfterInitializeFunc
@@ -128,8 +138,8 @@ type Hooks struct {
 	OnAfterGetPrompt              []OnAfterGetPromptFunc
 	OnBeforeListTools             []OnBeforeListToolsFunc
 	OnAfterListTools              []OnAfterListToolsFunc
-	OnBeforeCallTool              []OnBeforeCallToolFunc
-	OnAfterCallTool               []OnAfterCallToolFunc
+	OnBeforeAnyTool               []OnBeforeAnyToolFunc
+	OnAfterAnyTool                []OnAfterAnyToolFunc
 	OnBeforeGetTask               []OnBeforeGetTaskFunc
 	OnAfterGetTask                []OnAfterGetTaskFunc
 	OnBeforeListTasks             []OnBeforeListTasksFunc
@@ -523,30 +533,30 @@ func (c *Hooks) afterListTools(ctx context.Context, id any, message *mcp.ListToo
 		hook(ctx, id, message, result)
 	}
 }
-func (c *Hooks) AddBeforeCallTool(hook OnBeforeCallToolFunc) {
-	c.OnBeforeCallTool = append(c.OnBeforeCallTool, hook)
+func (c *Hooks) AddBeforeAnyTool(hook OnBeforeAnyToolFunc) {
+	c.OnBeforeAnyTool = append(c.OnBeforeAnyTool, hook)
 }
 
-func (c *Hooks) AddAfterCallTool(hook OnAfterCallToolFunc) {
-	c.OnAfterCallTool = append(c.OnAfterCallTool, hook)
+func (c *Hooks) AddAfterAnyTool(hook OnAfterAnyToolFunc) {
+	c.OnAfterAnyTool = append(c.OnAfterAnyTool, hook)
 }
 
-func (c *Hooks) beforeCallTool(ctx context.Context, id any, message *mcp.CallToolRequest) {
+func (c *Hooks) beforeAnyTool(ctx context.Context, id any, message *mcp.CallToolRequest) {
 	c.beforeAny(ctx, id, mcp.MethodToolsCall, message)
 	if c == nil {
 		return
 	}
-	for _, hook := range c.OnBeforeCallTool {
+	for _, hook := range c.OnBeforeAnyTool {
 		hook(ctx, id, message)
 	}
 }
 
-func (c *Hooks) afterCallTool(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+func (c *Hooks) afterAnyTool(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.AnyToolResult) {
 	c.onSuccess(ctx, id, mcp.MethodToolsCall, message, result)
 	if c == nil {
 		return
 	}
-	for _, hook := range c.OnAfterCallTool {
+	for _, hook := range c.OnAfterAnyTool {
 		hook(ctx, id, message, result)
 	}
 }
@@ -622,7 +632,7 @@ func (c *Hooks) beforeTaskResult(ctx context.Context, id any, message *mcp.TaskR
 	}
 }
 
-func (c *Hooks) afterTaskResult(ctx context.Context, id any, message *mcp.TaskResultRequest, result *mcp.TaskResultResult) {
+func (c *Hooks) afterTaskResult(ctx context.Context, id any, message *mcp.TaskResultRequest, result *mcp.TaskPayloadResult) {
 	c.onSuccess(ctx, id, mcp.MethodTasksResult, message, result)
 	if c == nil {
 		return
@@ -655,6 +665,34 @@ func (c *Hooks) afterCancelTask(ctx context.Context, id any, message *mcp.Cancel
 		return
 	}
 	for _, hook := range c.OnAfterCancelTask {
+		hook(ctx, id, message, result)
+	}
+} // Legacy CallTool hooks for backwards compatibility with CallTool hooks.
+
+func (c *Hooks) AddBeforeCallTool(hook OnBeforeCallToolFunc) {
+	c.OnBeforeCallTool = append(c.OnBeforeCallTool, hook)
+}
+
+func (c *Hooks) AddAfterCallTool(hook OnAfterCallToolFunc) {
+	c.OnAfterCallTool = append(c.OnAfterCallTool, hook)
+}
+
+// Does not call beforeAny as this is the responsibility of the callee
+func (c *Hooks) beforeCallTool(ctx context.Context, id any, message *mcp.CallToolRequest) {
+	if c == nil {
+		return
+	}
+	for _, hook := range c.OnBeforeCallTool {
+		hook(ctx, id, message)
+	}
+}
+
+// Does not call afterAny as this is the responsibility of the callee
+func (c *Hooks) afterCallTool(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+	if c == nil {
+		return
+	}
+	for _, hook := range c.OnAfterCallTool {
 		hook(ctx, id, message, result)
 	}
 }

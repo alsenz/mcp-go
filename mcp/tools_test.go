@@ -1693,3 +1693,12 @@ func TestWithToolIcons(t *testing.T) {
 
 	assert.Equal(t, icons, tool.Icons)
 }
+
+func TestToolWithToolLevelTasks(t *testing.T) {
+	//TODO add some dummy defs
+	optionalTaskTool := NewTool("optional_task_tool", WithToolLevelTaskSupport(ToolTaskSupportOptional))
+
+	assert.Equal(t, ToolTaskSupportOptional, optionalTaskTool.Execution.TaskSupport)
+
+	//TODO check the unmarshalling. TODO - from here tomorrow morning...
+}

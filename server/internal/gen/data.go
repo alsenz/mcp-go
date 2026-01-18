@@ -100,11 +100,11 @@ var MCPRequestTypes = []MCPRequestType{
 	}, {
 		MethodName:     "MethodToolsCall",
 		ParamType:      "CallToolRequest",
-		ResultType:     "CallToolResult",
+		ResultType:     "AnyToolResult",
 		Group:          "tools",
 		GroupName:      "Tools",
 		GroupHookName:  "Tool",
-		HookName:       "CallTool",
+		HookName:       "AnyTool",
 		UnmarshalError: "invalid call tool request",
 		HandlerFunc:    "handleToolCall",
 	}, {
@@ -130,7 +130,7 @@ var MCPRequestTypes = []MCPRequestType{
 	}, {
 		MethodName:     "MethodTasksResult",
 		ParamType:      "TaskResultRequest",
-		ResultType:     "TaskResultResult",
+		ResultType:     "TaskPayloadResult",
 		Group:          "tasks",
 		GroupName:      "Tasks",
 		GroupHookName:  "Task",

@@ -2485,7 +2485,7 @@ func TestMCPServer_GetTool(t *testing.T) {
 		}
 
 		numGoroutines := 100
-		results := make(chan *ServerTool, numGoroutines)
+		results := make(chan *ServerTaskTool, numGoroutines)
 		var wg sync.WaitGroup
 
 		// Test concurrent reads
@@ -2770,7 +2770,7 @@ func TestMCPServer_ListTools(t *testing.T) {
 		}
 
 		numGoroutines := 100
-		results := make(chan map[string]*ServerTool, numGoroutines)
+		results := make(chan map[string]*ServerTaskTool, numGoroutines)
 		var wg sync.WaitGroup
 
 		// Test concurrent reads (no race conditions in test logic)
@@ -2787,7 +2787,7 @@ func TestMCPServer_ListTools(t *testing.T) {
 		close(results)
 
 		// Collect all results
-		var allResults []map[string]*ServerTool
+		var allResults []map[string]*ServerTaskTool
 		for result := range results {
 			allResults = append(allResults, result)
 		}

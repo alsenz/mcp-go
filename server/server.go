@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -32,11 +33,13 @@ type resourceTemplateEntry struct {
 type taskEntry struct {
 	task       mcp.Task
 	sessionID  string
-	result     any                // The actual result once completed
-	resultErr  error              // Error if task failed
-	cancelFunc context.CancelFunc // Function to cancel the task
-	done       chan struct{}      // Channel to signal task completion
-	completed  bool               // Whether the task has been completed (guards done channel closure)
+	result     *mcp.TaskPayloadResult       // The actual result once completed
+	resultErr  error                        // Error if task failed
+	cancelFunc context.CancelFunc           // Function to cancel the task
+	done       chan struct{}                // Channel to signal task completion (channel closed) or pausing (empty struct)
+	pending    chan mcp.ElicitationRequest  // Channel to signal that the task is awaiting input
+	input      chan mcp.ElicitationResponse // Channel to deliver input elicitation response
+	completed  bool                         // Whether the task has been completed (guards done channel closure)
 }
 
 // ServerOption is a function that configures an MCPServer.
@@ -54,8 +57,14 @@ type PromptHandlerFunc func(ctx context.Context, request mcp.GetPromptRequest) (
 // ToolHandlerFunc handles tool calls with given arguments.
 type ToolHandlerFunc func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)
 
+// TaskToolHandlerFunc handles tool calls which may return task results with the given arguments
+type TaskToolHandlerFunc func(ctx context.Context, request mcp.CallToolRequest) (*mcp.AnyToolResult, error)
+
 // ToolHandlerMiddleware is a middleware function that wraps a ToolHandlerFunc.
 type ToolHandlerMiddleware func(ToolHandlerFunc) ToolHandlerFunc
+
+// TaskToolHandlerMiddleware is a middleware function that wraps a ToolHandlerFunc.
+type TaskToolHandlerMiddleware func(handlerFunc TaskToolHandlerFunc) TaskToolHandlerFunc
 
 // ResourceHandlerMiddleware is a middleware function that wraps a ResourceHandlerFunc.
 type ResourceHandlerMiddleware func(ResourceHandlerFunc) ResourceHandlerFunc
@@ -63,10 +72,23 @@ type ResourceHandlerMiddleware func(ResourceHandlerFunc) ResourceHandlerFunc
 // ToolFilterFunc is a function that filters tools based on context, typically using session information.
 type ToolFilterFunc func(ctx context.Context, tools []mcp.Tool) []mcp.Tool
 
+// ServerTaskTool combines a Tool with its TaskToolHandlerFunc.
+type ServerTaskTool struct {
+	Tool    mcp.Tool
+	Handler TaskToolHandlerFunc
+}
+
 // ServerTool combines a Tool with its ToolHandlerFunc.
 type ServerTool struct {
 	Tool    mcp.Tool
 	Handler ToolHandlerFunc
+}
+
+func (s *ServerTool) ToTaskTool() ServerTaskTool {
+	return ServerTaskTool{
+		s.Tool,
+		NewTaskToolAdaptor(s.Handler),
+	}
 }
 
 // ServerPrompt combines a Prompt with its handler function.
@@ -170,8 +192,8 @@ type MCPServer struct {
 	resourceTemplates          map[string]resourceTemplateEntry
 	prompts                    map[string]mcp.Prompt
 	promptHandlers             map[string]PromptHandlerFunc
-	tools                      map[string]ServerTool
-	toolHandlerMiddlewares     []ToolHandlerMiddleware
+	tools                      map[string]ServerTaskTool
+	toolHandlerMiddlewares     []TaskToolHandlerMiddleware
 	resourceHandlerMiddlewares []ResourceHandlerMiddleware
 	toolFilters                []ToolFilterFunc
 	notificationHandlers       map[string]NotificationHandlerFunc
@@ -219,9 +241,9 @@ type toolCapabilities struct {
 
 // taskCapabilities defines the supported task-related features
 type taskCapabilities struct {
-	list           bool
-	cancel         bool
-	toolCallTasks  bool
+	list          bool
+	cancel        bool
+	toolCallTasks bool
 }
 
 // WithResourceCapabilities configures resource-related server capabilities
@@ -239,6 +261,18 @@ func WithResourceCapabilities(subscribe, listChanged bool) ServerOption {
 // tool handler call chain.
 func WithToolHandlerMiddleware(
 	toolHandlerMiddleware ToolHandlerMiddleware,
+) ServerOption {
+	return func(s *MCPServer) {
+		s.toolMiddlewareMu.Lock()
+		s.toolHandlerMiddlewares = append(s.toolHandlerMiddlewares, NewTaskToolHandlerMiddlewareAdaptor(toolHandlerMiddleware))
+		s.toolMiddlewareMu.Unlock()
+	}
+}
+
+// WithTaskToolHandlerMiddleware allows adding a middleware for the
+// tool handler call chain.
+func WithTaskToolHandlerMiddleware(
+	toolHandlerMiddleware TaskToolHandlerMiddleware,
 ) ServerOption {
 	return func(s *MCPServer) {
 		s.toolMiddlewareMu.Lock()
@@ -385,8 +419,8 @@ func NewMCPServer(
 		resourceTemplates:          make(map[string]resourceTemplateEntry),
 		prompts:                    make(map[string]mcp.Prompt),
 		promptHandlers:             make(map[string]PromptHandlerFunc),
-		tools:                      make(map[string]ServerTool),
-		toolHandlerMiddlewares:     make([]ToolHandlerMiddleware, 0),
+		tools:                      make(map[string]ServerTaskTool),
+		toolHandlerMiddlewares:     make([]TaskToolHandlerMiddleware, 0),
 		resourceHandlerMiddlewares: make([]ResourceHandlerMiddleware, 0),
 		name:                       name,
 		version:                    version,
@@ -402,6 +436,11 @@ func NewMCPServer(
 
 	for _, opt := range opts {
 		opt(s)
+	}
+
+	if s.hooks != nil {
+		s.hooks.AddBeforeAnyTool(NewTaskToolBeforeHookAdaptor(s.hooks))
+		s.hooks.AddAfterAnyTool(NewTaskToolAfterHookAdaptor(s.hooks))
 	}
 
 	return s
@@ -574,14 +613,30 @@ func (s *MCPServer) AddTool(tool mcp.Tool, handler ToolHandlerFunc) {
 	s.AddTools(ServerTool{Tool: tool, Handler: handler})
 }
 
+// AddTaskTool registers a new tool and its handler which returns a CreateTaskResult, or optionally returns either
+func (s *MCPServer) AddTaskTool(tool mcp.Tool, handler TaskToolHandlerFunc) {
+	s.AddTaskTools(ServerTaskTool{Tool: tool, Handler: handler})
+}
+
 // Register tool capabilities due to a tool being added.  Default to
 // listChanged: true, but don't change the value if we've already explicitly
 // registered tools.listChanged false.
-func (s *MCPServer) implicitlyRegisterToolCapabilities() {
+func (s *MCPServer) implicitlyRegisterToolCapabilities(taskAugmentedSupport bool) {
 	s.implicitlyRegisterCapabilities(
 		func() bool { return s.capabilities.tools != nil },
 		func() { s.capabilities.tools = &toolCapabilities{listChanged: true} },
 	)
+	if taskAugmentedSupport {
+		s.implicitlyRegisterCapabilities(
+			func() bool { return s.capabilities.tasks != nil && s.capabilities.tasks.toolCallTasks },
+			func() {
+				if s.capabilities.tasks == nil {
+					s.capabilities.tasks = &taskCapabilities{}
+				}
+				s.capabilities.tasks.toolCallTasks = true
+			},
+		)
+	}
 }
 
 func (s *MCPServer) implicitlyRegisterResourceCapabilities() {
@@ -615,7 +670,12 @@ func (s *MCPServer) implicitlyRegisterCapabilities(check func() bool, register f
 
 // AddTools registers multiple tools at once
 func (s *MCPServer) AddTools(tools ...ServerTool) {
-	s.implicitlyRegisterToolCapabilities()
+	s.AddTaskTools(AdaptTools(tools...)...)
+}
+
+// AddTools registers multiple task augmented tools at once
+func (s *MCPServer) AddTaskTools(tools ...ServerTaskTool) {
+	s.implicitlyRegisterToolCapabilities(containTaskAugmented(tools...))
 
 	s.toolsMu.Lock()
 	for _, entry := range tools {
@@ -630,16 +690,21 @@ func (s *MCPServer) AddTools(tools ...ServerTool) {
 	}
 }
 
-// SetTools replaces all existing tools with the provided list
+// SetTools replaces all existing tools with the provided list, including task tools
 func (s *MCPServer) SetTools(tools ...ServerTool) {
+	s.AddTaskTools(AdaptTools(tools...)...)
+}
+
+// SetTaskTools replaces all existing tools with the provided list
+func (s *MCPServer) SetTaskTools(tools ...ServerTaskTool) {
 	s.toolsMu.Lock()
-	s.tools = make(map[string]ServerTool, len(tools))
+	s.tools = make(map[string]ServerTaskTool, len(tools))
 	s.toolsMu.Unlock()
-	s.AddTools(tools...)
+	s.AddTaskTools(tools...)
 }
 
 // GetTool retrieves the specified tool
-func (s *MCPServer) GetTool(toolName string) *ServerTool {
+func (s *MCPServer) GetTool(toolName string) *ServerTaskTool {
 	s.toolsMu.RLock()
 	defer s.toolsMu.RUnlock()
 	if tool, ok := s.tools[toolName]; ok {
@@ -648,14 +713,14 @@ func (s *MCPServer) GetTool(toolName string) *ServerTool {
 	return nil
 }
 
-func (s *MCPServer) ListTools() map[string]*ServerTool {
+func (s *MCPServer) ListTools() map[string]*ServerTaskTool {
 	s.toolsMu.RLock()
 	defer s.toolsMu.RUnlock()
 	if len(s.tools) == 0 {
 		return nil
 	}
 	// Create a copy to prevent external modification
-	toolsCopy := make(map[string]*ServerTool, len(s.tools))
+	toolsCopy := make(map[string]*ServerTaskTool, len(s.tools))
 	for name, tool := range s.tools {
 		toolsCopy[name] = &tool
 	}
@@ -689,6 +754,82 @@ func (s *MCPServer) AddNotificationHandler(
 	s.notificationHandlersMu.Lock()
 	defer s.notificationHandlersMu.Unlock()
 	s.notificationHandlers[method] = handler
+}
+
+// CreateTask helper method creates a task and a CreateTaskResult to return to clients.
+// returns the task ID and create task result.
+// Implementors must ensure CompleteTask or FailTask is called with the returned task id.
+func (s *MCPServer) CreateTask(ctx context.Context, taskOpts ...mcp.TaskOption) (context.Context, string, *mcp.CreateTaskResult) {
+	task := mcp.NewTask(uuid.New().String(), taskOpts...)
+	entry := s.createTask(ctx, task.TaskId, task.TTL, task.PollInterval)
+	entry.task = task
+	session := ClientSessionFromContext(ctx)
+	// Don't tie the task to the request context
+	taskCtx := s.WithContext(context.Background(), session)
+	taskCtx = context.WithValue(taskCtx, serverKey{}, s)
+	taskCtx, cancelFunc := context.WithCancel(taskCtx)
+	entry.cancelFunc = cancelFunc
+	return taskCtx, entry.task.TaskId, &mcp.CreateTaskResult{
+		Task: task,
+	}
+}
+
+// CompleteTask helper method completes the task with the taskID in the server for the session associated with the context
+func (s *MCPServer) CompleteTask(ctx context.Context, taskID string, result *mcp.TaskPayloadResult) error {
+	if err := ValidateTaskPayload(result); err != nil {
+		return err
+	}
+	entry, err := s.getTaskEntry(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	s.completeTask(entry, result, nil)
+	return nil
+}
+
+// FailTask helper method makes the task with taskID have error state in the server for the session associated with the context
+func (s *MCPServer) FailTask(ctx context.Context, taskId string, err error) error {
+	entry, err := s.getTaskEntry(ctx, taskId)
+	if err != nil {
+		return err
+	}
+	s.completeTask(entry, nil, err)
+	return nil
+}
+
+// CancelTask cancels the underlying task entry
+func (s *MCPServer) CancelTask(ctx context.Context, taskId string) error {
+	return s.cancelTask(ctx, taskId)
+}
+
+// RequestInput changes the task state to input_required and begins elicitation flow as a related-task elicitation.
+func (s *MCPServer) RequestInput(ctx context.Context, taskId string, elicitationRequest mcp.ElicitationRequest) (*mcp.ElicitationResponse, error) {
+	entry, err := s.getTaskEntry(ctx, taskId)
+	s.tasksMu.RLock()
+	done := entry.done
+	input := entry.input
+	s.tasksMu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	changed, err := s.requireTaskInput(entry, elicitationRequest)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return nil, fmt.Errorf("task %s already requesting input", taskId)
+	}
+	select {
+	case response := <-input:
+		// related task elicitation response
+		return &response, nil
+	case <-ctx.Done():
+		// provided context, typically task or derived context itself
+		return nil, ctx.Err()
+	case <-done:
+		// task was terminated outside of task context
+		return nil, ErrTaskTerminated
+	}
 }
 
 func (s *MCPServer) handleInitialize(
@@ -1315,18 +1456,18 @@ func (s *MCPServer) handleToolCall(
 	ctx context.Context,
 	id any,
 	request mcp.CallToolRequest,
-) (*mcp.CallToolResult, *requestError) {
+) (*mcp.AnyToolResult, *requestError) {
 	// First check session-specific tools
-	var tool ServerTool
+	var tool ServerTaskTool
 	var ok bool
 
 	session := ClientSessionFromContext(ctx)
 	if session != nil {
 		if sessionWithTools, typeAssertOk := session.(SessionWithTools); typeAssertOk {
 			if sessionTools := sessionWithTools.GetSessionTools(); sessionTools != nil {
-				var sessionOk bool
-				tool, sessionOk = sessionTools[request.Params.Name]
+				sessionTool, sessionOk := sessionTools[request.Params.Name]
 				if sessionOk {
+					tool = sessionTool.ToTaskTool()
 					ok = true
 				}
 			}
@@ -1365,6 +1506,34 @@ func (s *MCPServer) handleToolCall(
 			id:   id,
 			code: mcp.INTERNAL_ERROR,
 			err:  err,
+		}
+	}
+
+	if err := ValidateAnyToolResult(result); err != nil {
+		return nil, &requestError{
+			id:   id,
+			code: mcp.INTERNAL_ERROR,
+			err:  err,
+		}
+	}
+
+	// Validate that CreateTasksResults happen when allowed
+	if _, ok := (*result).(mcp.CreateTaskResult); ok {
+		taskSupport := tool.Tool.Execution.TaskSupport
+		if taskSupport == "" || taskSupport == mcp.ToolTaskSupportForbidden {
+			return nil, &requestError{
+				id:   id,
+				code: mcp.INTERNAL_ERROR,
+				err:  fmt.Errorf("cannot return task result, tool declared task support: '%s'", taskSupport),
+			}
+		}
+		serverTaskCaps := s.capabilities.tasks
+		if serverTaskCaps == nil || !serverTaskCaps.toolCallTasks {
+			return nil, &requestError{
+				id:   id,
+				code: mcp.INTERNAL_ERROR,
+				err:  fmt.Errorf("cannot return task result, task augmented tool server capability disabled"),
+			}
 		}
 	}
 
@@ -1439,66 +1608,95 @@ func (s *MCPServer) handleListTasks(
 	return &result, nil
 }
 
+//TODO probably very valid to type the task entry come to think o fit.
+
 // handleTaskResult handles tasks/result requests to get task results.
 func (s *MCPServer) handleTaskResult(
 	ctx context.Context,
 	id any,
 	request mcp.TaskResultRequest,
-) (*mcp.TaskResultResult, *requestError) {
-	task, done, err := s.getTask(ctx, request.Params.TaskId)
-	if err != nil {
-		return nil, &requestError{
-			id:   id,
-			code: mcp.INVALID_PARAMS,
-			err:  err,
-		}
-	}
-
-	// Wait for task completion if not terminal
-	if !task.Status.IsTerminal() {
-		select {
-		case <-done:
-			// Task completed
-		case <-ctx.Done():
+) (*mcp.TaskPayloadResult, *requestError) {
+	for {
+		entry, err := s.getTaskEntry(ctx, request.Params.TaskId)
+		if err != nil {
 			return nil, &requestError{
 				id:   id,
-				code: mcp.REQUEST_INTERRUPTED,
-				err:  ctx.Err(),
+				code: mcp.INVALID_PARAMS,
+				err:  err,
 			}
 		}
-	}
 
-	// Re-fetch the task entry to get the final result/error under lock
-	entry, err := s.getTaskEntry(ctx, request.Params.TaskId)
-	if err != nil {
-		return nil, &requestError{
-			id:   id,
-			code: mcp.INVALID_PARAMS,
-			err:  err,
+		s.tasksMu.RLock()
+		task := entry.task
+		done := entry.done
+		pending := entry.pending
+		s.tasksMu.RUnlock()
+
+		// Otherwise wait for task completion if not terminal
+		if !task.Status.IsTerminal() {
+			select {
+			case elicitation := <-pending:
+				// Ensure that io.modelcontextprotocol/related-task is set as per mcp spec
+				elicitation.Request.Params.Meta.Upsert(mcp.MetadataKeyRelatedTask, map[string]string{
+					"taskId": task.TaskId,
+				})
+				result, err := s.RequestElicitation(ctx, elicitation)
+				if err != nil {
+					return nil, &requestError{
+						id:   id,
+						code: mcp.INTERNAL_ERROR,
+						err:  err,
+					}
+				}
+				if _, err := s.resumeTask(entry, result.ElicitationResponse); err != nil {
+					return nil, &requestError{
+						id:   id,
+						code: mcp.INTERNAL_ERROR,
+						err:  err,
+					}
+				}
+				//MCP protocol 5.6.3: calls to tasks/result for non-terminal tasks must block until the task terminates
+				continue
+			case <-done:
+				// Task completed
+			case <-ctx.Done():
+				return nil, &requestError{
+					id:   id,
+					code: mcp.REQUEST_INTERRUPTED,
+					err:  ctx.Err(),
+				}
+			}
 		}
-	}
 
-	// Read result error under lock
-	s.tasksMu.RLock()
-	resultErr := entry.resultErr
-	s.tasksMu.RUnlock()
-
-	// Return error if task failed
-	if resultErr != nil {
-		return nil, &requestError{
-			id:   id,
-			code: mcp.INTERNAL_ERROR,
-			err:  resultErr,
+		// Re-fetch the task entry to get the final result/error under lock
+		entry, err = s.getTaskEntry(ctx, request.Params.TaskId)
+		if err != nil {
+			return nil, &requestError{
+				id:   id,
+				code: mcp.INVALID_PARAMS,
+				err:  err,
+			}
 		}
+
+		// Read result error and payload under lock
+		s.tasksMu.RLock()
+		resultErr := entry.resultErr
+		payload := entry.result
+		s.tasksMu.RUnlock()
+
+		// Return error if task failed
+		if resultErr != nil {
+			return nil, &requestError{
+				id:   id,
+				code: mcp.INTERNAL_ERROR,
+				err:  resultErr,
+			}
+		}
+
+		return payload, nil
+
 	}
 
-	// The result structure varies by original request type
-	// For now, return the raw result wrapped in TaskResultResult
-	result := &mcp.TaskResultResult{
-		Result: mcp.Result{},
-	}
-
-	return result, nil
 }
 
 // handleCancelTask handles tasks/cancel requests to cancel a task.
@@ -1536,7 +1734,7 @@ func (s *MCPServer) handleCancelTask(
 
 // createTask creates a new task entry and returns it.
 func (s *MCPServer) createTask(ctx context.Context, taskID string, ttl *int64, pollInterval *int64) *taskEntry {
-	opts := []mcp.TaskOption{}
+	var opts []mcp.TaskOption
 	if ttl != nil {
 		opts = append(opts, mcp.WithTaskTTL(*ttl))
 	}
@@ -1549,6 +1747,8 @@ func (s *MCPServer) createTask(ctx context.Context, taskID string, ttl *int64, p
 		task:      task,
 		sessionID: getSessionID(ctx),
 		done:      make(chan struct{}),
+		pending:   make(chan mcp.ElicitationRequest),
+		input:     make(chan mcp.ElicitationResponse),
 	}
 
 	s.tasksMu.Lock()
@@ -1626,7 +1826,8 @@ func (s *MCPServer) listTasks(ctx context.Context) []mcp.Task {
 }
 
 // completeTask marks a task as completed with the given result.
-func (s *MCPServer) completeTask(entry *taskEntry, result any, err error) {
+// result must be a valid type: i.e. *mcp.CallToolResult
+func (s *MCPServer) completeTask(entry *taskEntry, result *mcp.TaskPayloadResult, err error) {
 	s.tasksMu.Lock()
 	defer s.tasksMu.Unlock()
 
@@ -1647,6 +1848,48 @@ func (s *MCPServer) completeTask(entry *taskEntry, result any, err error) {
 	// Mark as completed and signal
 	entry.completed = true
 	close(entry.done)
+}
+
+// setInputRequired returns whether the status changed and an optional error
+func (s *MCPServer) requireTaskInput(entry *taskEntry, elicitationRequest mcp.ElicitationRequest) (bool, error) {
+	s.tasksMu.Lock()
+	defer s.tasksMu.Unlock()
+
+	// Don't allow setting input required for already completed tasks
+	if entry.completed {
+		return false, fmt.Errorf("cannot require input for task in terminal status: %s", entry.task.Status)
+	}
+
+	if changed := entry.task.Status != mcp.TaskStatusInputRequired; !changed {
+		return changed, nil
+	}
+
+	entry.task.Status = mcp.TaskStatusInputRequired
+	entry.task.StatusMessage = "Task input required by server"
+
+	// Signal one task result listener that input is required
+	entry.pending <- elicitationRequest
+
+	return true, nil
+}
+
+func (s *MCPServer) resumeTask(entry *taskEntry, input mcp.ElicitationResponse) (bool, error) {
+	s.tasksMu.Lock()
+	defer s.tasksMu.Unlock()
+
+	// Don't allow setting input required for already completed tasks
+	if entry.completed {
+		return false, fmt.Errorf("cannot require input for task in terminal status: %s", entry.task.Status)
+	}
+
+	changed := entry.task.Status == mcp.TaskStatusInputRequired
+
+	entry.task.Status = mcp.TaskStatusWorking
+	entry.task.StatusMessage = "Task resumed"
+
+	entry.input <- input
+
+	return changed, nil
 }
 
 // cancelTask cancels a running task.

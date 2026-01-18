@@ -59,6 +59,14 @@ type OnSuccessHookFunc func(ctx context.Context, id any, method mcp.MCPMethod, m
 // })
 type OnErrorHookFunc func(ctx context.Context, id any, method mcp.MCPMethod, message any, err error)
 
+// OnBeforeCallToolFunc is a function that is called before handling a (non-task) Tool call
+// It is always invoked even when the tool call returns a CreateTaskResult
+type OnBeforeCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest)
+
+// OnAfterCallToolFunc is a function that is called after a tool handler has returned an initial response
+// If the tool is task augmented and the tool handler returns a CreateTaskResult, message is nil
+type OnAfterCallToolFunc func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult)
+
 // OnRequestInitializationFunc is a function that called before handle diff request method
 // Should any errors arise during func execution, the service will promptly return the corresponding error message.
 type OnRequestInitializationFunc func(ctx context.Context, id any, message any) error
@@ -75,6 +83,8 @@ type Hooks struct {
 	OnBeforeAny      []BeforeAnyHookFunc
 	OnSuccess        []OnSuccessHookFunc
 	OnError          []OnErrorHookFunc
+	OnBeforeCallTool      []OnBeforeCallToolFunc
+	OnAfterCallTool       []OnAfterCallToolFunc
 	OnRequestInitialization       []OnRequestInitializationFunc
 {{- range .}}
 	OnBefore{{.HookName}} []OnBefore{{.HookName}}Func
@@ -250,4 +260,35 @@ func (c *Hooks) after{{.HookName}}(ctx context.Context, id any, message *mcp.{{.
 		hook(ctx, id, message, result)
 	}
 }
+
 {{- end -}}
+
+// Legacy CallTool hooks for backwards compatibility with CallTool hooks.
+
+func (c *Hooks) AddBeforeCallTool(hook OnBeforeCallToolFunc) {
+	c.OnBeforeCallTool = append(c.OnBeforeCallTool, hook)
+}
+
+func (c *Hooks) AddAfterCallTool(hook OnAfterCallToolFunc) {
+	c.OnAfterCallTool = append(c.OnAfterCallTool, hook)
+}
+
+// Does not call beforeAny as this is the responsibility of the callee
+func (c *Hooks) beforeCallTool(ctx context.Context, id any, message *mcp.CallToolRequest) {
+	if c == nil {
+		return
+	}
+	for _, hook := range c.OnBeforeCallTool {
+		hook(ctx, id, message)
+	}
+}
+
+// Does not call afterAny as this is the responsibility of the callee
+func (c *Hooks) afterCallTool(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+	if c == nil {
+		return
+	}
+	for _, hook := range c.OnAfterCallTool {
+		hook(ctx, id, message, result)
+	}
+}
